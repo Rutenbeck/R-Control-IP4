@@ -364,12 +364,67 @@ Diese Endpunkte sind für Provisionierung/Produktion gedacht.
 - Permission: `settings`
 - Body: JSON (max. 1024 Bytes)
   - Pflicht: `articleNumber`, `serialNumber`, `productionDate` (`YYYY-MM-DD`)
-  - Optional: `macAddress` (setzt Base-MAC)
-  - Optional: `calibrateNtc` (bool), `ntcRefTempC` (number)
+  - Optional: `macAddress` (setzt Base-MAC), `hostname`
+- Bereits gesetzte Daten dürfen **überschrieben** werden. Einziger Schreibschutz ist
+  `POST /api/factory/lock`; ein Überschreiben wird als Warnung geloggt.
 - Fehler:
-  - `409 factory_locked`
-  - `409 already_provisioned`
-  - `400 invalid_date`, `400 invalid_mac`, `400 invalid_chars`
+  - `409 factory_locked` — Factory-Bereich gesperrt
+  - `400 missing_fields`, `400 invalid_date`, `400 invalid_mac`, `400 invalid_chars`, `400 invalid_hostname`
+
+> NTC-Kalibrierung läuft **nicht** über diesen Endpunkt, sondern über
+> `POST /api/factory/ntc-calibrate`.
+
+#### `POST /api/factory/ntc-calibrate`
+- Auth: erforderlich
+- Permission: `settings`
+- Body: JSON (max. 256 Bytes), **genau eines** von:
+  - `refTempC` (number) — Referenzwiderstand-Punkt, nur −25, 25 oder 55 (±2 °C)
+  - `fault` (string) — `"open"` (nichts angeschlossen) oder `"short"` (Eingang gebrückt)
+- Unabhängig von Provisionierung und `locked`; Nachkalibrieren ist jederzeit möglich.
+- Fehler:
+  - `400 invalid_request` — keines oder beide Felder gesetzt
+  - `400 invalid_fault` — `fault` ist weder `"open"` noch `"short"`
+  - `400 ntc_ref_temp_unsupported` — `refTempC` nicht nahe −25/25/55
+  - `400 ntc_measurement_implausible` — Messwert passt nicht zum erwarteten Punkt
+  - `409 ntc_no_measurement` — noch kein gültiger Messwert (nach Umklemmen ~3 s warten)
+
+##### NTC-Kalibrierablauf
+
+Fünf Aufrufe, je einer pro Messpunkt:
+
+| Schritt | Am Eingang | Body |
+|---|---|---|
+| 1 | 86430 Ω | `{"refTempC":-25}` |
+| 2 | 10000 Ω | `{"refTempC":25}` |
+| 3 | 3536 Ω | `{"refTempC":55}` |
+| 4 | nichts angeschlossen | `{"fault":"open"}` |
+| 5 | Eingang gebrückt | `{"fault":"short"}` |
+
+Schritt 1–3 zuerst: die Fehler-Ankerpunkte werden gegen p1/p3 plausibilisiert.
+
+Schritt 4 und 5 brauchen keine Referenzwiderstände. Sie liefern die Schwellen für
+„nicht angeschlossen" und „Kurzschluss" als **direkte Messung**, statt sie aus dem
+Divider-Modell zu extrapolieren — die Extrapolation war so empfindlich, dass 1 %
+Messfehler in Schritt 1–3 die Open-Schwelle über den echten Messwert schieben und
+die Erkennung stillschweigend abschalten konnte.
+
+Zwischen den Schritten mindestens einen Messzyklus (2 s, besser 3 s) warten: die
+Kalibrierung verwendet den zuletzt gemessenen mV-Wert.
+
+Beispiel:
+
+```bash
+curl -X POST http://GERAET/api/factory/ntc-calibrate \
+  -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"fault":"open"}'
+```
+
+Das Objekt `ntcCalibration` (Response von `ntc-calibrate`, `provision` und
+`GET /api/factory/info`) enthält: `offsetC`, `rScale`, `vddMv`, `fixedOhm`,
+`dividerCalibrated`, `mvCorrectionCalibrated`, `p1Mv`, `p2Mv`, `p3Mv`, `openMv`,
+`shortMv`, `faultAnchorsCalibrated`, `openThresholdMv`, `shortThresholdMv`,
+`isDefault`.
 
 #### `POST /api/factory/lock`
 - Auth: erforderlich

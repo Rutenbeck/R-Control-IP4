@@ -364,12 +364,67 @@ These endpoints are intended for provisioning/production.
 - Permission: `settings`
 - Body: JSON (max. 1024 bytes)
   - Required: `articleNumber`, `serialNumber`, `productionDate` (`YYYY-MM-DD`)
-  - Optional: `macAddress` (sets base MAC)
-  - Optional: `calibrateNtc` (bool), `ntcRefTempC` (number)
+  - Optional: `macAddress` (sets base MAC), `hostname`
+- Existing data may be **overwritten**. The only write protection is
+  `POST /api/factory/lock`; an overwrite is logged as a warning.
 - Errors:
-  - `409 factory_locked`
-  - `409 already_provisioned`
-  - `400 invalid_date`, `400 invalid_mac`, `400 invalid_chars`
+  - `409 factory_locked` — factory area is locked
+  - `400 missing_fields`, `400 invalid_date`, `400 invalid_mac`, `400 invalid_chars`, `400 invalid_hostname`
+
+> NTC calibration is **not** handled by this endpoint — use
+> `POST /api/factory/ntc-calibrate`.
+
+#### `POST /api/factory/ntc-calibrate`
+- Auth: required
+- Permission: `settings`
+- Body: JSON (max. 256 bytes), **exactly one** of:
+  - `refTempC` (number) — reference resistor point, only −25, 25 or 55 (±2 °C)
+  - `fault` (string) — `"open"` (nothing connected) or `"short"` (input bridged)
+- Independent of provisioning and `locked`; re-calibration is always possible.
+- Errors:
+  - `400 invalid_request` — neither or both fields set
+  - `400 invalid_fault` — `fault` is neither `"open"` nor `"short"`
+  - `400 ntc_ref_temp_unsupported` — `refTempC` not near −25/25/55
+  - `400 ntc_measurement_implausible` — reading does not match the expected point
+  - `409 ntc_no_measurement` — no valid reading yet (wait ~3 s after rewiring)
+
+##### NTC calibration procedure
+
+Five calls, one per measurement point:
+
+| Step | At the input | Body |
+|---|---|---|
+| 1 | 86430 Ω | `{"refTempC":-25}` |
+| 2 | 10000 Ω | `{"refTempC":25}` |
+| 3 | 3536 Ω | `{"refTempC":55}` |
+| 4 | nothing connected | `{"fault":"open"}` |
+| 5 | input bridged | `{"fault":"short"}` |
+
+Do steps 1–3 first: the fault anchors are sanity-checked against p1/p3.
+
+Steps 4 and 5 need no reference resistors. They provide the "not connected" and
+"short circuit" thresholds as a **direct measurement** instead of extrapolating them
+from the divider model — that extrapolation was sensitive enough that a 1% error in
+steps 1–3 could push the open threshold past the real reading and silently disable
+open-circuit detection.
+
+Wait at least one sample period (2 s, better 3 s) between steps: calibration uses the
+most recently measured mV value.
+
+Example:
+
+```bash
+curl -X POST http://DEVICE/api/factory/ntc-calibrate \
+  -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"fault":"open"}'
+```
+
+The `ntcCalibration` object (returned by `ntc-calibrate`, `provision` and
+`GET /api/factory/info`) contains: `offsetC`, `rScale`, `vddMv`, `fixedOhm`,
+`dividerCalibrated`, `mvCorrectionCalibrated`, `p1Mv`, `p2Mv`, `p3Mv`, `openMv`,
+`shortMv`, `faultAnchorsCalibrated`, `openThresholdMv`, `shortThresholdMv`,
+`isDefault`.
 
 #### `POST /api/factory/lock`
 - Auth: required
